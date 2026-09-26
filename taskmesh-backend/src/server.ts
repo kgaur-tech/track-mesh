@@ -92,6 +92,13 @@ const submissionBodySchema = z
     }
   });
 
+const localEvaluationSchema = z.object({
+  kind: z.literal("dsa"),
+  content: z.string().trim().min(1).max(30_000),
+  programmingLanguage: z.string().trim().min(1).max(50),
+  taskDescription: z.string().trim().min(1).max(5_000),
+});
+
 function sendJson(
   response: ServerResponse,
   statusCode: number,
@@ -273,6 +280,54 @@ async function handleRequest(
       message:
         "TaskMesh backend is running",
     });
+  }
+
+  if (request.method === "POST" && pathname === "/api/local/evaluate") {
+    let hostname = "";
+    try {
+      hostname = new URL(`http://${request.headers.host ?? ""}`).hostname;
+    } catch {
+      return sendJson(response, 400, { success: false, error: "Invalid request host" });
+    }
+    const remoteAddress = request.socket.remoteAddress;
+    const isLoopback = remoteAddress === "127.0.0.1" || remoteAddress === "::1" || remoteAddress === "::ffff:127.0.0.1";
+    if (process.env.NODE_ENV === "production" || !isLoopback || !["localhost", "127.0.0.1", "::1"].includes(hostname)) {
+      return sendJson(response, 404, { success: false, error: "Not found" });
+    }
+
+    try {
+      const contentType = request.headers["content-type"] ?? "";
+      if (contentType.includes("multipart/form-data")) {
+        const { fields, file } = await readMultipart(request);
+        if (fields.kind !== "english" || !file) {
+          return sendJson(response, 400, { success: false, error: "Choose an audio or video recording to submit" });
+        }
+        const supportedTypes = new Set(["audio/mpeg", "audio/mp4", "audio/wav", "audio/x-wav", "audio/webm", "audio/mpga", "audio/m4a", "audio/x-m4a", "audio/ogg", "audio/flac", "video/mp4", "video/webm", "video/quicktime"]);
+        if (!supportedTypes.has(file.mimeType)) {
+          return sendJson(response, 415, { success: false, error: "Use an MP3, MP4, M4A, WAV, or WebM recording" });
+        }
+        const transcript = await transcribeAudio(file.buffer, file.filename, file.mimeType);
+        if (!transcript) return sendJson(response, 422, { success: false, error: "No speech could be detected in this recording" });
+        const evaluation = await evaluateSubmission({
+          initiative: { name: "English Initiative", evaluationRubric: null },
+          taskDescription: fields.taskDescription ?? "Speak clearly and naturally about the assigned prompt.",
+          submission: { type: "VIDEO_URL", content: transcript, transcript },
+        });
+        return sendJson(response, 200, { success: true, evaluation: { ...evaluation, transcript } });
+      }
+
+      const parsed = localEvaluationSchema.safeParse(await readJson(request));
+      if (!parsed.success) return sendJson(response, 400, { success: false, error: "Enter a solution and programming language before submitting" });
+      const evaluation = await evaluateSubmission({
+        initiative: { name: "DSA Initiative", evaluationRubric: null },
+        taskDescription: parsed.data.taskDescription,
+        submission: { type: "CODE", content: parsed.data.content, programmingLanguage: parsed.data.programmingLanguage },
+      });
+      return sendJson(response, 200, { success: true, evaluation });
+    } catch (error) {
+      console.error("Local AI evaluation failed:", error);
+      return sendJson(response, 503, { success: false, error: error instanceof Error ? error.message : "Evaluation could not be completed" });
+    }
   }
 
   try {
@@ -2175,11 +2230,7 @@ async function handleRequest(
   });
 }
 
-createServer(handleRequest).listen(
-  port,
-  () => {
-    console.log(
-      `TaskMesh backend listening on http://localhost:${port}`,
-    );
-  },
-);
+const server = createServer(handleRequest);
+const onListening = () => console.log(`TaskMesh backend listening on http://localhost:${port}`);
+if (process.env.NODE_ENV === "production") server.listen(port, onListening);
+else server.listen(port, "127.0.0.1", onListening);

@@ -91,6 +91,7 @@ model User {
   id               String                 @id @default(cuid())
   googleId         String?                @unique
   email            String                 @unique
+  passwordHash     String?
   name             String?
   username         String?                @unique
   avatarUrl        String?

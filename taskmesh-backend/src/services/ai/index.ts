@@ -19,6 +19,7 @@ export type EvaluationInput = {
     name: string;
     evaluationRubric: unknown;
   };
+  taskDescription?: string;
 
   submission: {
     content: string | null;
@@ -84,8 +85,8 @@ function cleanAIResponse(
     typeof value !== "object" ||
     value === null
   ) {
-    throw new Error(
-      "OpenAI returned an invalid evaluation",
+      throw new Error(
+        "The AI provider returned an invalid evaluation",
     );
   }
 
@@ -135,7 +136,7 @@ function cleanAIResponse(
     score > 100
   ) {
     throw new Error(
-      "OpenAI returned an invalid score",
+      "The AI provider returned an invalid score",
     );
   }
 
@@ -160,6 +161,9 @@ Analyze the student's English speech transcript.
 Initiative:
 ${input.initiative.name}
 
+Challenge:
+${input.taskDescription ?? "General English speaking practice"}
+
 Transcript:
 """
 ${submissionText}
@@ -180,6 +184,8 @@ Important:
 - Do NOT judge the student's intelligence.
 - Do NOT invent mistakes that are not present.
 - Identify actual mistakes or weak areas from the transcript.
+- Evaluate only language, clarity, vocabulary, structure, and relevance supported by the transcript.
+- Do not claim to assess pronunciation, accent, volume, or vocal delivery from a transcript.
 - Give practical corrections.
 - Keep the feedback understandable for a student.
 - If the transcript is already good, say so.
@@ -219,6 +225,9 @@ ${language}
 Initiative:
 ${input.initiative.name}
 
+Problem:
+${input.taskDescription ?? "General data structures and algorithms practice"}
+
 Student code:
 """
 ${submissionText}
@@ -243,6 +252,11 @@ Important:
 - Explain actual bugs clearly.
 - Give the expected time complexity.
 - Give the expected space complexity.
+- Inspect the submitted code's actual data structures and loops before describing complexity.
+- Do not call a hash-map solution quadratic unless the submitted code contains nested scans.
+- Do not recommend an optimization that the submission already implements.
+- For Two Sum, checking the map before inserting the current value prevents reusing the same index; do not flag that as a bug when the code follows this order.
+- Do not criticize missing input validation or unspecified edge cases unless the task explicitly requires them or the code demonstrably fails the stated task.
 - Suggest a better approach only when there is a meaningful improvement.
 - Keep feedback understandable for a student.
 - Score from 0 to 100.
@@ -259,6 +273,69 @@ Return ONLY JSON with exactly these fields:
 
 The score should represent the quality of the submitted solution.
 `;
+}
+
+async function evaluateWithOpenAI(prompt: string): Promise<AIResponse> {
+  const response = await openAIClient().responses.create({
+    model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+    input: [
+      { role: "system", content: "You are a precise educational evaluator. Return valid JSON only." },
+      { role: "user", content: prompt },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "evaluation",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            score: { type: "number", minimum: 0, maximum: 100 },
+            strengths: { type: "array", items: { type: "string" } },
+            weaknesses: { type: "array", items: { type: "string" } },
+            feedback: { type: "string" },
+            improvements: { type: "array", items: { type: "string" } },
+          },
+          required: ["score", "strengths", "weaknesses", "feedback", "improvements"],
+          additionalProperties: false,
+        },
+      },
+    },
+  });
+  if (!response.output_text) throw new Error("The AI provider returned an empty evaluation");
+  return cleanAIResponse(JSON.parse(response.output_text) as unknown);
+}
+
+async function evaluateWithOllama(prompt: string, dsa: boolean): Promise<AIResponse> {
+  const baseUrl = (process.env.OLLAMA_URL ?? "http://127.0.0.1:11434").replace(/\/$/, "");
+  const model = dsa
+    ? process.env.OLLAMA_DSA_MODEL ?? "qwen2.5-coder:7b"
+    : process.env.OLLAMA_MODEL ?? "qwen2.5:7b";
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        format: "json",
+        keep_alive: "10m",
+        messages: [
+          { role: "system", content: "You are a precise educational evaluator. Return valid JSON only with score (0-100), strengths, weaknesses, feedback, and improvements." },
+          { role: "user", content: prompt },
+        ],
+        options: { temperature: 0.1, num_ctx: 8192, num_predict: 600 },
+      }),
+      signal: AbortSignal.timeout(180_000),
+    });
+  } catch {
+    throw new Error(`Local AI is unavailable. Start Ollama and download the model with: ollama pull ${model}`);
+  }
+  const payload = await response.json() as { message?: { content?: string }; error?: string };
+  if (!response.ok) throw new Error(payload.error ?? `Local model request failed (${response.status})`);
+  if (!payload.message?.content) throw new Error("The local model returned an empty evaluation");
+  return cleanAIResponse(JSON.parse(payload.message.content) as unknown);
 }
 
 export async function evaluateSubmission(
@@ -289,107 +366,17 @@ export async function evaluateSubmission(
       );
 
   try {
-    const openai = openAIClient();
-    const response =
-      await openai.responses.create({
-        model: "gpt-5.6-luna",
-
-        input: [
-          {
-            role: "system",
-            content:
-              "You are a precise educational evaluator. Return valid JSON only.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-
-        text: {
-          format: {
-            type: "json_schema",
-            name: "evaluation",
-            strict: true,
-            schema: {
-              type: "object",
-
-              properties: {
-                score: {
-                  type: "number",
-                  minimum: 0,
-                  maximum: 100,
-                },
-
-                strengths: {
-                  type: "array",
-                  items: {
-                    type: "string",
-                  },
-                },
-
-                weaknesses: {
-                  type: "array",
-                  items: {
-                    type: "string",
-                  },
-                },
-
-                feedback: {
-                  type: "string",
-                },
-
-                improvements: {
-                  type: "array",
-                  items: {
-                    type: "string",
-                  },
-                },
-              },
-
-              required: [
-                "score",
-                "strengths",
-                "weaknesses",
-                "feedback",
-                "improvements",
-              ],
-
-              additionalProperties: false,
-            },
-          },
-        },
-      });
-
-    const output =
-      response.output_text;
-
-    if (!output) {
-      throw new Error(
-        "OpenAI returned an empty evaluation",
-      );
-    }
-
-    let parsed: unknown;
-
-    try {
-      parsed = JSON.parse(output);
-    } catch {
-      throw new Error(
-        "OpenAI returned invalid JSON",
-      );
-    }
-
-    const cleaned =
-      cleanAIResponse(parsed);
-
+    const provider = process.env.AI_PROVIDER ?? "ollama";
+    const cleaned = provider === "openai"
+      ? await evaluateWithOpenAI(prompt)
+      : await evaluateWithOllama(prompt, dsa);
     return {
       ...cleaned,
       source: "AI",
     };
   } catch (error) {
     console.error(
-      "OpenAI evaluation failed:",
+      "AI evaluation failed:",
       error,
     );
 

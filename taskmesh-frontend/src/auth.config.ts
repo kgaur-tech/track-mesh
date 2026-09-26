@@ -47,6 +47,7 @@ const authConfig = {
       const pathname = request.nextUrl.pathname;
       const isProtectedPage = pathname.startsWith("/app") || pathname.startsWith("/leader");
 
+      if (process.env.NODE_ENV === "development") return true;
       if (!isProtectedPage) return true;
       if (auth?.user) return true;
 

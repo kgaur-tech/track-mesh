@@ -4,8 +4,10 @@ import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 
 export default async function Layout({ children }: Readonly<{ children: ReactNode }>) {
-  const result = await requireRole(["LEADER", "ADMIN"]);
-  if ("response" in result) redirect("/app");
+  if (process.env.NODE_ENV !== "development") {
+    const result = await requireRole(["LEADER", "ADMIN"]);
+    if ("response" in result) redirect("/app");
+  }
 
   return <AppShell role="leader">{children}</AppShell>;
 }

@@ -1,11 +1,18 @@
 import NextAuth from "next-auth";
 import type { NextAuthConfig } from "next-auth";
+import Credentials from "next-auth/providers/credentials";
+import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import authConfig from "@/auth.config";
+import { verifyPassword } from "@/lib/password";
 
 const googleClientId = process.env.AUTH_GOOGLE_ID;
 const googleClientSecret = process.env.AUTH_GOOGLE_SECRET;
 const authSecret = process.env.AUTH_SECRET;
+const credentialsSchema = z.object({
+  email: z.string().trim().email(),
+  password: z.string().min(1).max(128),
+});
 
 if (process.env.NODE_ENV === "production" && (!googleClientId || !googleClientSecret || !authSecret)) {
   throw new Error(
@@ -33,6 +40,28 @@ declare module "next-auth" {
 const databaseAuthConfig = {
   ...authConfig,
   secret: authSecret,
+  providers: [
+    ...authConfig.providers,
+    Credentials({
+      name: "Email and password",
+      credentials: {
+        email: { label: "Email", type: "email" },
+        password: { label: "Password", type: "password" },
+      },
+      async authorize(credentials) {
+        const parsed = credentialsSchema.safeParse(credentials);
+        if (!parsed.success) return null;
+
+        const user = await prisma.user.findUnique({
+          where: { email: parsed.data.email.toLowerCase() },
+          select: { id: true, email: true, name: true, avatarUrl: true, passwordHash: true, googleId: true },
+        });
+        if (!user?.passwordHash || !(await verifyPassword(parsed.data.password, user.passwordHash))) return null;
+
+        return { id: user.id, email: user.email, name: user.name, image: user.avatarUrl, googleId: user.googleId };
+      },
+    }),
+  ],
   session: {
     strategy: "jwt" as const,
   },
@@ -42,6 +71,8 @@ const databaseAuthConfig = {
       if (!user.email) {
         return false;
       }
+
+      if (account?.provider !== "google") return true;
 
       const googleId = account?.providerAccountId ?? user.id ?? user.email;
 
